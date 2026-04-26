@@ -12,7 +12,9 @@ Bot Discord (interações HTTP + `DEFER` + `waitUntil` na Vercel) e base de dado
 
 ## 1. Base de dados
 
-1. No Supabase: **SQL** → cola o conteúdo de [supabase/migrations/20260426000000_initial.sql](supabase/migrations/20260426000000_initial.sql) e executa.
+1. No Supabase: **SQL** → cola e executa, por ordem:
+   - [supabase/migrations/20260426000000_initial.sql](supabase/migrations/20260426000000_initial.sql)
+   - [supabase/migrations/20260426120000_queue_lane_board.sql](supabase/migrations/20260426120000_queue_lane_board.sql) (lane na fila + tabela do painel fixo)
 2. **Authentication** → ativa e-mail (magic link) conforme a documentação do Supabase.
 3. Anota o **URL**, **anon key** e **service_role** (Settings → API).
 
@@ -78,7 +80,7 @@ Bot Discord (interações HTTP + `DEFER` + `waitUntil` na Vercel) e base de dado
   - Localmente (ou GitHub Actions), executa o script de registo (ver secção “Registar slash commands”).
   - Dica: usa `DISCORD_GUILD_ID` para testes rápidos no teu servidor.
 9. **Verificação final**
-  - No Discord, testa: `/perfil` (deve instruir a vincular), `/entrar`, `/fila`
+  - No Discord, testa: `/perfil` (deve instruir a vincular), `/entrar lane:TOP` (ou JG/MID/ADC), `/fila`
   - Staff: `/sortear` e depois `/resultado vencedor:A|B`
 
 ### Deploy: problemas comuns (Vercel)
@@ -170,7 +172,7 @@ npm test
 
 1. Regista no site com o link mágico (`/login`).
 2. Página `vincular`: gera código; no Discord, `/vincular codigo:XXXXXX`.
-3. Fila: `/entrar` até 10; **staff** `/sortear`; jogam a custom; **staff** `/resultado vencedor: A` ou `B`.
+3. Fila: `/entrar lane:...` (TOP / JG / MID / ADC) até 10. O **painel** (embed fixo no canal) atualiza sozinho com posições e menções. **Staff** `/sortear`; após a custom, **staff** `/resultado vencedor: A` ou `B`.
 4. `ranking` e página web `/ranking` listam o MMR.
 
 ## Limites e notas

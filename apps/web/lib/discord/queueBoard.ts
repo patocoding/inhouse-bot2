@@ -3,6 +3,13 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 export const LANES = ["TOP", "JG", "MID", "ADC"] as const;
 export type Lane = (typeof LANES)[number];
 
+const LANE_LABEL: Record<Lane, string> = {
+  TOP: "TOP",
+  JG: "JG",
+  MID: "MID",
+  ADC: "ADC",
+};
+
 export function isLane(s: string): s is Lane {
   return (LANES as readonly string[]).includes(s);
 }
@@ -17,32 +24,79 @@ type QueueRow = {
   } | null;
 };
 
-function buildEmbedBody(rows: QueueRow[]): { title: string; description: string } {
+type DiscordEmbedField = { name: string; value: string; inline: boolean };
+
+function buildQueueEmbedPayload(rows: QueueRow[]): {
+  title: string;
+  description: string;
+  fields: DiscordEmbedField[];
+} {
   const n = rows.length;
-  const title = `Fila Inhouse — ${n}/10`;
+  const title = "Fila Inhouse";
   if (n === 0) {
     return {
       title,
       description:
-        "Fila vazia.\n\nUsa `/entrar` e escolhe **lane**: TOP, JG, MID ou ADC.\nO painel atualiza automaticamente.",
+        "**0/10** na fila.\n\nUsa `/entrar` e escolhe a tua **lane** (TOP, JG, MID, ADC). Esta mensagem **atualiza** quando alguém entra, sai ou a staff dá **sortear**.",
+      fields: LANES.map((lane) => ({
+        name: `${LANE_LABEL[lane]} (0)`,
+        value: "— *ninguém* —",
+        inline: true,
+      })),
     };
   }
-  const lines = rows.map((r, i) => {
-    const pr = r.profiles;
-    const mmr = pr?.mmr != null ? Math.round(pr.mmr) : "—";
-    const mention = pr?.discord_user_id ? `<@${pr.discord_user_id}>` : "—";
-    const name = pr?.display_name?.trim() || "—";
-    const lane = (r.lane as string) || "—";
-    return `**${i + 1}.** ${mention} · **${lane}** · MMR ${mmr}\n_${name}_`;
-  });
-  return {
-    title,
-    description: lines.join("\n\n").slice(0, 3900),
+
+  // Posição global = ordem de `joined_at` (já vem ordenado da query)
+  const byLane: Record<Lane, { gpos: number; r: QueueRow }[]> = {
+    TOP: [],
+    JG: [],
+    MID: [],
+    ADC: [],
   };
+  rows.forEach((r, i) => {
+    const raw = ((r.lane as string) || "TOP").toUpperCase();
+    const lane = (LANES as readonly string[]).includes(raw) ? (raw as Lane) : "TOP";
+    byLane[lane].push({ gpos: i + 1, r });
+  });
+
+  const linesGlobal = rows
+    .map((r, i) => {
+      const pr = r.profiles;
+      const m = pr?.discord_user_id ? `<@${pr.discord_user_id}>` : "—";
+      return `\`${i + 1}\` ${m}`;
+    })
+    .join(" → ");
+  const desc =
+    `**${n}/10** · \`#n\` = posição **global** (ordem de chegada).\nAbaixo: quem está em **cada lane**.\n\n` +
+    `**Ordem geral:** ${linesGlobal}`.slice(0, 3800);
+
+  const fields: DiscordEmbedField[] = LANES.map((lane) => {
+    const pl = byLane[lane];
+    const count = pl.length;
+    const value =
+      count === 0
+        ? "— *vazio* —"
+        : pl
+            .map(({ gpos, r }) => {
+              const pr = r.profiles;
+              const mmr = pr?.mmr != null ? Math.round(pr.mmr) : "—";
+              const mention = pr?.discord_user_id ? `<@${pr.discord_user_id}>` : "—";
+              return `**\`#${gpos}\`** ${mention} · MMR **${mmr}**`;
+            })
+            .join("\n");
+    return {
+      name: `${LANE_LABEL[lane]} (${count})`,
+      value: value.slice(0, 1020),
+      inline: true,
+    };
+  });
+
+  return { title, description: desc, fields };
 }
 
 /**
  * Cria ou edita a mensagem embed do painel da fila no canal.
+ * Atualiza em tempo real = sempre que o handler chama isto (entrar/sair/sortear).
  */
 export async function syncQueueBoardMessage(
   supabase: SupabaseClient,
@@ -59,13 +113,16 @@ export async function syncQueueBoardMessage(
     throw new Error("syncQueueBoardMessage: " + error.message);
   }
   const list = (rows ?? []) as unknown as QueueRow[];
-  const { title, description } = buildEmbedBody(list);
+  const { title, description, fields } = buildQueueEmbedPayload(list);
 
-  const embed = {
+  const embed: Record<string, unknown> = {
     title,
     description,
+    fields,
     color: 0x3b82f6,
-    footer: { text: "Atualizado automaticamente · posições por ordem de entrada" },
+    footer: {
+      text: "Atualiza ao entrar, sair ou sortear — mantém este canal aberto",
+    },
     timestamp: new Date().toISOString(),
   };
 
