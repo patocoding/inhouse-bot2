@@ -1,0 +1,13 @@
+{
+  "name": "inhouse-lol",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @inhouse/core && npm run build -w @inhouse/web",
+    "test": "npm run test -w @inhouse/core && npm run test -w @inhouse/web",
+    "register-commands": "node packages/discord-commands/register.mjs"
+  }
+}
