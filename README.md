@@ -53,9 +53,10 @@ Bot Discord (interações HTTP + `DEFER` + `waitUntil` na Vercel) e base de dado
   - Framework: **Next.js** (a Vercel normalmente detecta)
 4. **Build & Output**
   - Em geral pode ficar no default. Se precisares forçar:
-    - **Install Command**: `npm install`
-    - **Build Command**: `npm run build`
-  - Nota: o `npm run build` na raiz compila `@inhouse/core` e depois `apps/web`.
+    - **Install Command**: `npm install` (ou `npm ci` se usas lockfile)
+    - **Build Command**: **`npm run build` (recomendado)** — **não** uses `next build` diretamente neste setup
+  - Porquê: o `apps/web` tem um `prebuild` que corre `tsc` em `packages/core` para gerar `dist/` antes do Next importar `@inhouse/core`.
+  - Alternativa (na raiz do monorepo): `npm run build` (compila `@inhouse/core` e depois `@inhouse/web`), mas na Vercel costuma ser mais simples Root Directory = `apps/web`.
 5. **Environment Variables (Production)**
   - Vai em Project → **Settings → Environment Variables** e cria:
     - `NEXT_PUBLIC_SUPABASE_URL`
