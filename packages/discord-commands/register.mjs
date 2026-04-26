@@ -34,7 +34,26 @@ const body = [
     ],
   },
   { name: "perfil", description: "Ver MMR, vitórias e derrotas", type: 1, dm_permission: false },
-  { name: "entrar", description: "Entrar na fila inhouse (máx. 10)", type: 1, dm_permission: false },
+  {
+    name: "entrar",
+    description: "Entrar na fila inhouse (máx. 10) com a tua lane",
+    type: 1,
+    dm_permission: false,
+    options: [
+      {
+        type: 3,
+        name: "lane",
+        description: "A tua lane",
+        required: true,
+        choices: [
+          { name: "TOP", value: "TOP" },
+          { name: "JG", value: "JG" },
+          { name: "MID", value: "MID" },
+          { name: "ADC", value: "ADC" },
+        ],
+      },
+    ],
+  },
   { name: "sair", description: "Sair da fila", type: 1, dm_permission: false },
   { name: "fila", description: "Ver a fila atual", type: 1, dm_permission: false },
   { name: "sortear", description: "Sortear 5v5 balanceado (Staff)", type: 1, dm_permission: false },

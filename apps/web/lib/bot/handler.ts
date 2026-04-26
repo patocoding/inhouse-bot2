@@ -1,7 +1,8 @@
 import { bestSplit5v5, computeMmrUpdates, averageMmr } from "@inhouse/core";
 import { getServiceClient } from "@/lib/supabase/admin";
-import { isStaffGuildMember } from "@/lib/env";
+import { getServerEnv, isStaffGuildMember } from "@/lib/env";
 import type { LinkCodeRow, ProfileRow } from "@/lib/database.types";
+import { isLane, syncQueueBoardMessage } from "@/lib/discord/queueBoard";
 
 export type DInteraction = {
   type: number;
@@ -115,6 +116,14 @@ export async function processApplicationCommand(
       };
     }
     case "entrar": {
+      const channelId = it.channel_id;
+      if (!channelId) {
+        return { content: "Canal inválido." };
+      }
+      const rawLane = (optionString(it, "lane") ?? "").trim().toUpperCase();
+      if (!isLane(rawLane)) {
+        return { content: "Escolhe a **lane**: TOP, JG, MID ou ADC no comando `/entrar`." };
+      }
       const { data: p } = await supabase
         .from("profiles")
         .select("id")
@@ -123,14 +132,32 @@ export async function processApplicationCommand(
       if (!p) {
         return { content: "Vincula a conta: site + `/vincular`." };
       }
-      const { data: inq } = await supabase
+      const { data: existing } = await supabase
         .from("queue_entries")
         .select("id")
         .eq("guild_id", guildId)
         .eq("user_id", p.id)
         .maybeSingle();
-      if (inq) {
-        return { content: "Já estás na fila." };
+      if (existing) {
+        const { error: uerr } = await supabase
+          .from("queue_entries")
+          .update({ lane: rawLane })
+          .eq("guild_id", guildId)
+          .eq("user_id", p.id);
+        if (uerr) {
+          return { content: "Não foi possível atualizar a lane." };
+        }
+        try {
+          const { DISCORD_BOT_TOKEN } = getServerEnv();
+          await syncQueueBoardMessage(supabase, DISCORD_BOT_TOKEN, guildId, channelId);
+        } catch (e) {
+          console.error(e);
+          return {
+            content:
+              `Lane atualizada para **${rawLane}**. (Aviso: painel da fila não atualizou — verifica permissões do bot no canal.)`,
+          };
+        }
+        return { content: `Lane atualizada para **${rawLane}**. O painel no canal foi atualizado.` };
       }
       const { count } = await supabase
         .from("queue_entries")
@@ -141,13 +168,29 @@ export async function processApplicationCommand(
       }
       const { error } = await supabase
         .from("queue_entries")
-        .insert({ guild_id: guildId, user_id: p.id });
+        .insert({ guild_id: guildId, user_id: p.id, lane: rawLane });
       if (error) {
         return { content: "Não foi possível entrar na fila." };
       }
-      return { content: "Entraste na fila. Fila: " + ((count ?? 0) + 1) + "/10." };
+      try {
+        const { DISCORD_BOT_TOKEN } = getServerEnv();
+        await syncQueueBoardMessage(supabase, DISCORD_BOT_TOKEN, guildId, channelId);
+      } catch (e) {
+        console.error(e);
+        return {
+          content:
+            "Entraste na fila (" +
+            ((count ?? 0) + 1) +
+            "/10). Aviso: não consegui atualizar o painel — verifica se o bot pode **enviar/editar mensagens** neste canal.",
+        };
+      }
+      return { content: "Entraste na fila como **" + rawLane + "** (" + ((count ?? 0) + 1) + "/10). Vê o painel fixo no canal." };
     }
     case "sair": {
+      const channelId = it.channel_id;
+      if (!channelId) {
+        return { content: "Canal inválido." };
+      }
       const { data: p } = await supabase
         .from("profiles")
         .select("id")
@@ -161,29 +204,38 @@ export async function processApplicationCommand(
         .delete()
         .eq("guild_id", guildId)
         .eq("user_id", p.id);
+      try {
+        const { DISCORD_BOT_TOKEN } = getServerEnv();
+        await syncQueueBoardMessage(supabase, DISCORD_BOT_TOKEN, guildId, channelId);
+      } catch (e) {
+        console.error(e);
+      }
       return { content: "Saíste da fila." };
     }
     case "fila": {
       const { data: rows, error } = await supabase
         .from("queue_entries")
-        .select("user_id, joined_at, profiles(display_name, mmr, discord_user_id)")
+        .select("user_id, lane, joined_at, profiles(display_name, mmr, discord_user_id)")
         .eq("guild_id", guildId)
         .order("joined_at", { ascending: true });
       if (error) {
         return { content: "Erro a ler a fila." };
       }
       if (!rows?.length) {
-        return { content: "Fila vazia. Usa `/entrar`." };
+        return { content: "Fila vazia. Usa `/entrar` com a tua lane (TOP/JG/MID/ADC)." };
       }
       const lines = rows.map((r, i) => {
-        const pr = (r as unknown as { profiles: { display_name: string | null; mmr: number; discord_user_id: string | null } | null })
-          .profiles;
+        const pr = (r as unknown as {
+          lane: string;
+          profiles: { display_name: string | null; mmr: number; discord_user_id: string | null } | null;
+        }).profiles;
+        const lane = (r as unknown as { lane: string }).lane ?? "—";
         const m = pr?.mmr != null ? Math.round(pr.mmr) : "-";
         const n = pr?.display_name?.trim() ||
           (pr?.discord_user_id ? `${pr.discord_user_id.slice(0, 6)}…` : "—");
-        return `${i + 1}. ${n} (${m})`;
+        return `${i + 1}. ${n} · **${lane}** (${m})`;
       });
-      return { content: `**Fila ${rows.length}/10**\n` + lines.join("\n") };
+      return { content: `**Fila ${rows.length}/10**\n` + lines.join("\n") + "\n\n(O painel fixo no canal mostra menções e posições.)" };
     }
     case "sortear": {
       if (!isStaffGuildMember(it.member?.roles)) {
@@ -194,7 +246,7 @@ export async function processApplicationCommand(
       }
       const { data: qrows, error: qe } = await supabase
         .from("queue_entries")
-        .select("user_id, profiles(id, display_name, mmr, games_played, discord_user_id)")
+        .select("user_id, lane, profiles(id, display_name, mmr, games_played, discord_user_id)")
         .eq("guild_id", guildId)
         .order("joined_at", { ascending: true });
       if (qe) {
@@ -204,21 +256,24 @@ export async function processApplicationCommand(
         return { content: "São necessários 10 na fila. Atual: " + (qrows?.length ?? 0) + "/10." };
       }
       const players = qrows.map((row) => {
-        const pr = (row as unknown as { profiles: { id: string; display_name: string | null; mmr: number; games_played: number; discord_user_id: string | null } | null })
-          .profiles;
+        const pr = (row as unknown as {
+          lane: string;
+          profiles: { id: string; display_name: string | null; mmr: number; games_played: number; discord_user_id: string | null } | null;
+        }).profiles;
         if (!pr?.id) {
           return null;
         }
         return {
           id: pr.id,
           mmr: Number(pr.mmr),
+          lane: (row as unknown as { lane: string }).lane ?? "—",
           name: pr.display_name?.trim() || pr.discord_user_id || "—",
         };
       });
       if (players.some((p) => p == null)) {
         return { content: "Dados de jogador inválidos na fila." };
       }
-      const clean = players as { id: string; mmr: number; name: string }[];
+      const clean = players as { id: string; mmr: number; name: string; lane: string }[];
       const { teamA, teamB, diff } = bestSplit5v5(
         clean.map((p) => ({ id: p.id, mmr: p.mmr }))
       );
@@ -253,8 +308,19 @@ export async function processApplicationCommand(
         return { content: "Erro ao gravar participantes. Tenta de novo." };
       }
       await supabase.from("queue_entries").delete().eq("guild_id", guildId);
+      if (it.channel_id) {
+        try {
+          const { DISCORD_BOT_TOKEN } = getServerEnv();
+          await syncQueueBoardMessage(supabase, DISCORD_BOT_TOKEN, guildId, it.channel_id);
+        } catch (e) {
+          console.error(e);
+        }
+      }
       const listTeam = (t: { id: string; mmr: number }[], label: string, avg: number) => {
-        const ppl = t.map((x) => `• ${byId.get(x.id)?.name ?? "?"} (${Math.round(x.mmr)})`);
+        const ppl = t.map((x) => {
+          const c = byId.get(x.id);
+          return `• ${c?.name ?? "?"} **${c?.lane ?? "—"}** (${Math.round(x.mmr)})`;
+        });
         return `**${label}** (média **${(Math.round(avg * 10) / 10).toFixed(1)}**)\n` + ppl.join("\n");
       };
       const diffTxt = (Math.round(diff * 10) / 10).toFixed(1);
