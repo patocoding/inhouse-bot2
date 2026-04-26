@@ -25,6 +25,37 @@ function optionString(data: DInteraction, name: string): string | undefined {
   return String(o.value);
 }
 
+/** Mensagem útil no Discord + log em Vercel; erros de fila costumam ser RLS (chave anon) ou migração em falta. */
+function logQueueError(context: string, err: { code?: string; message?: string; details?: string | null }) {
+  console.error(`[inhouse] ${context}`, { code: err.code, message: err.message, details: err.details });
+}
+
+/** Erros de insert/select na fila (RLS, migração, chave). */
+function queueSupabaseErrorHint(err: { code?: string; message?: string }): string {
+  const m = (err.message ?? "").toLowerCase();
+  if (err.code === "23505" || m.includes("duplicate key") || m.includes("unique constraint")) {
+    return "Já estás na fila deste servidor (inscrição duplicada). Usa `/fila` — se ainda disser vazio, verifica `SUPABASE_SERVICE_ROLE_KEY` (service_role) no Vercel.";
+  }
+  if (m.includes("column") && m.includes("lane")) {
+    return "Falta migração SQL: aplica `20260426120000_queue_lane_board.sql` no Supabase (coluna `lane`).";
+  }
+  if (m.includes("null value") && m.includes("lane")) {
+    return "Coluna `lane` ausente ou NOT NULL — aplica a migração `queue_lane` no Supabase.";
+  }
+  if (
+    err.code === "42501" ||
+    m.includes("row-level security") ||
+    m.includes("violates row-level security") ||
+    m.includes("permission denied")
+  ) {
+    return "O bot não consegue escrever na tabela: no Vercel, `SUPABASE_SERVICE_ROLE_KEY` tem de ser a chave **service_role** (Supabase → Project Settings → API), não a chave pública/anon.";
+  }
+  if (m.includes("jwt") || m.includes("invalid api key") || m.includes("invalid value for jwt")) {
+    return "Chave do Supabase inválida. Confirma `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY` no Vercel.";
+  }
+  return "Não foi possível entrar. Verifica: (1) `SUPABASE_SERVICE_ROLE_KEY` = **service_role**; (2) migrações SQL aplicadas. Vê o erro exacto nos logs do Vercel (Function → `/api/interactions`).";
+}
+
 export function makeDeferPayload(): { type: number; data: { flags: number } } {
   return { type: 5, data: { flags: 64 } };
 }
@@ -170,7 +201,8 @@ export async function processApplicationCommand(
         .from("queue_entries")
         .insert({ guild_id: guildId, user_id: p.id, lane: rawLane });
       if (error) {
-        return { content: "Não foi possível entrar na fila." };
+        logQueueError("queue_entries insert", error);
+        return { content: "Não foi possível entrar na fila.\n\n" + queueSupabaseErrorHint(error) };
       }
       try {
         const { DISCORD_BOT_TOKEN } = getServerEnv();
@@ -219,10 +251,15 @@ export async function processApplicationCommand(
         .eq("guild_id", guildId)
         .order("joined_at", { ascending: true });
       if (error) {
-        return { content: "Erro a ler a fila." };
+        logQueueError("queue_entries select (fila)", error);
+        return { content: "Erro a ler a fila.\n\n" + queueSupabaseErrorHint(error) };
       }
       if (!rows?.length) {
-        return { content: "Fila vazia. Usa `/entrar` com a tua lane (TOP/JG/MID/ADC)." };
+        return {
+          content:
+            "Fila vazia. Usa `/entrar` com a tua lane (TOP/JG/MID/ADC).\n" +
+            "Se o servidor **já devia** ter pessoas na fila, no Vercel a env `SUPABASE_SERVICE_ROLE_KEY` provavelmente **não** é a chave **service_role** (Supabase → API) — a chave `anon` faz a fila parecer vazia e bloqueia `/entrar`.",
+        };
       }
       const lines = rows.map((r, i) => {
         const pr = (r as unknown as {
