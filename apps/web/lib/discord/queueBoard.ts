@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-export const LANES = ["TOP", "JG", "MID", "ADC"] as const;
+export const LANES = ["TOP", "JG", "MID", "ADC", "SUP"] as const;
 export type Lane = (typeof LANES)[number];
 
 const LANE_LABEL: Record<Lane, string> = {
@@ -8,6 +8,7 @@ const LANE_LABEL: Record<Lane, string> = {
   JG: "JG",
   MID: "MID",
   ADC: "ADC",
+  SUP: "SUP",
 };
 
 export function isLane(s: string): s is Lane {
@@ -37,11 +38,11 @@ function buildQueueEmbedPayload(rows: QueueRow[]): {
     return {
       title,
       description:
-        "**0/10** na fila.\n\nUsa `/entrar` e escolhe a tua **lane** (TOP, JG, MID, ADC). Esta mensagem **atualiza** quando alguém entra, sai ou a staff dá **sortear**.",
+        "**0/10** na fila.\n\nUsa `/entrar` e escolhe a tua **lane** (TOP, JG, MID, ADC, SUP). Esta mensagem **atualiza** quando alguém entra, sai ou a staff dá **sortear**.",
       fields: LANES.map((lane) => ({
         name: `${LANE_LABEL[lane]} (0)`,
         value: "— *ninguém* —",
-        inline: true,
+        inline: false,
       })),
     };
   }
@@ -52,6 +53,7 @@ function buildQueueEmbedPayload(rows: QueueRow[]): {
     JG: [],
     MID: [],
     ADC: [],
+    SUP: [],
   };
   rows.forEach((r, i) => {
     const raw = ((r.lane as string) || "TOP").toUpperCase();
@@ -87,7 +89,7 @@ function buildQueueEmbedPayload(rows: QueueRow[]): {
     return {
       name: `${LANE_LABEL[lane]} (${count})`,
       value: value.slice(0, 1020),
-      inline: true,
+      inline: false,
     };
   });
 

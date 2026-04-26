@@ -50,6 +50,7 @@ const body = [
           { name: "JG", value: "JG" },
           { name: "MID", value: "MID" },
           { name: "ADC", value: "ADC" },
+          { name: "SUP", value: "SUP" },
         ],
       },
     ],
@@ -76,6 +77,43 @@ const body = [
     ],
   },
   { name: "ranking", description: "Top 20 MMR", type: 1, dm_permission: false },
+  {
+    name: "canais",
+    description: "Staff: definir canal do painel da fila e do ranking",
+    type: 1,
+    dm_permission: false,
+    options: [
+      {
+        type: 1,
+        name: "fila",
+        description: "Canal onde o embed da fila fica (TOP/JG/MID/ADC/SUP)",
+        options: [
+          {
+            type: 7,
+            name: "canal",
+            description: "Canal de texto do painel da fila",
+            required: true,
+            channel_types: [0],
+          },
+        ],
+      },
+      {
+        type: 1,
+        name: "ranking",
+        description: "Canal onde o top 20 MMR fica (embed fixo)",
+        options: [
+          {
+            type: 7,
+            name: "canal",
+            description: "Canal de texto do ranking",
+            required: true,
+            channel_types: [0],
+          },
+        ],
+      },
+      { type: 1, name: "ver", description: "Ver canais de fila e ranking definidos" },
+    ],
+  },
 ];
 
 const r = await fetch(path, {

@@ -3,6 +3,12 @@ import { getServiceClient } from "@/lib/supabase/admin";
 import { getServerEnv, isStaffGuildMember } from "@/lib/env";
 import type { LinkCodeRow, ProfileRow } from "@/lib/database.types";
 import { isLane, syncQueueBoardMessage } from "@/lib/discord/queueBoard";
+import {
+  patchGuildTextChannels,
+  resolveQueueChannelId,
+  resolveRankingChannelId,
+} from "@/lib/discord/guildSettings";
+import { syncRankingBoardMessage } from "@/lib/discord/rankingBoard";
 
 export type DInteraction = {
   type: number;
@@ -11,9 +17,39 @@ export type DInteraction = {
   member?: { user?: { id: string }; roles?: string[]; permissions?: string } | null;
   user?: { id: string } | null;
   guild_id?: string | null;
-  data?: { name?: string; options?: { name: string; value?: string | number; type: number }[] };
+  data?: {
+    name?: string;
+    options?: Array<{
+      name: string;
+      value?: string | number;
+      type: number;
+      options?: Array<{ name: string; value?: string | number; type: number }>;
+    }>;
+  };
   channel_id?: string;
 };
+
+/** Subcomandos de `/canais`: fila, ranking, ver. */
+function parseCanaisSub(it: DInteraction): { kind: "fila" | "ranking" | "ver"; channelId?: string } {
+  const o = it.data?.options?.[0] as
+    | { name: string; type: number; options?: { name: string; value?: string | number; type: number }[] }
+    | undefined;
+  if (!o) {
+    return { kind: "ver" };
+  }
+  if (o.name === "ver" && o.type === 1) {
+    return { kind: "ver" };
+  }
+  const ch = o.options?.find((x) => x.name === "canal");
+  const channelId = ch?.value != null ? String(ch.value) : undefined;
+  if (o.name === "fila") {
+    return { kind: "fila", channelId };
+  }
+  if (o.name === "ranking") {
+    return { kind: "ranking", channelId };
+  }
+  return { kind: "ver" };
+}
 
 function getDiscordUserId(i: DInteraction): string {
   return i.member?.user?.id ?? i.user?.id ?? "";
@@ -30,8 +66,8 @@ function logQueueError(context: string, err: { code?: string; message?: string; 
   console.error(`[inhouse] ${context}`, { code: err.code, message: err.message, details: err.details });
 }
 
-/** Erros de insert/select na fila (RLS, migração, chave). */
-function queueSupabaseErrorHint(err: { code?: string; message?: string }): string {
+/** Erros de insert/update/select na fila (RLS, migração, chave). */
+function queueSupabaseErrorHint(err: { code?: string; message?: string; hint?: string | null }): string {
   const m = (err.message ?? "").toLowerCase();
   if (err.code === "23505" || m.includes("duplicate key") || m.includes("unique constraint")) {
     return "Já estás na fila deste servidor (inscrição duplicada). Usa `/fila` — se ainda disser vazio, verifica `SUPABASE_SERVICE_ROLE_KEY` (service_role) no Vercel.";
@@ -53,7 +89,14 @@ function queueSupabaseErrorHint(err: { code?: string; message?: string }): strin
   if (m.includes("jwt") || m.includes("invalid api key") || m.includes("invalid value for jwt")) {
     return "Chave do Supabase inválida. Confirma `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY` no Vercel.";
   }
-  return "Não foi possível entrar. Verifica: (1) `SUPABASE_SERVICE_ROLE_KEY` = **service_role**; (2) migrações SQL aplicadas. Vê o erro exacto nos logs do Vercel (Function → `/api/interactions`).";
+  const extra = (err.hint ?? "").trim();
+  if (extra) {
+    return (
+      "Não foi possível concluir a operação. Verifica `SUPABASE_SERVICE_ROLE_KEY` (service_role) e migrações SQL.\n\n" +
+      `**Detalhe:** ${extra}`
+    );
+  }
+  return "Não foi possível concluir a operação. Verifica: (1) `SUPABASE_SERVICE_ROLE_KEY` = **service_role**; (2) migrações SQL. Vê o erro completo nos logs do Vercel (Function → `/api/interactions`).";
 }
 
 export function makeDeferPayload(): { type: number; data: { flags: number } } {
@@ -147,13 +190,15 @@ export async function processApplicationCommand(
       };
     }
     case "entrar": {
-      const channelId = it.channel_id;
-      if (!channelId) {
+      const eventChannel = it.channel_id;
+      if (!eventChannel) {
         return { content: "Canal inválido." };
       }
+      const queueChannel =
+        (await resolveQueueChannelId(supabase, guildId, eventChannel)) ?? eventChannel;
       const rawLane = (optionString(it, "lane") ?? "").trim().toUpperCase();
       if (!isLane(rawLane)) {
-        return { content: "Escolhe a **lane**: TOP, JG, MID ou ADC no comando `/entrar`." };
+        return { content: "Escolhe a **lane**: TOP, JG, MID, ADC ou SUP no comando `/entrar`." };
       }
       const { data: p } = await supabase
         .from("profiles")
@@ -176,19 +221,23 @@ export async function processApplicationCommand(
           .eq("guild_id", guildId)
           .eq("user_id", p.id);
         if (uerr) {
-          return { content: "Não foi possível atualizar a lane." };
+          logQueueError("queue_entries update lane", uerr);
+          return { content: "Não foi possível atualizar a lane.\n\n" + queueSupabaseErrorHint(uerr) };
         }
         try {
           const { DISCORD_BOT_TOKEN } = getServerEnv();
-          await syncQueueBoardMessage(supabase, DISCORD_BOT_TOKEN, guildId, channelId);
+          await syncQueueBoardMessage(supabase, DISCORD_BOT_TOKEN, guildId, queueChannel);
         } catch (e) {
           console.error(e);
           return {
             content:
-              `Lane atualizada para **${rawLane}**. (Aviso: painel da fila não atualizou — verifica permissões do bot no canal.)`,
+              `Lane atualizada para **${rawLane}**. (Aviso: painel da fila não atualizou em ${`<#${queueChannel}>`} — permissões do bot.)`,
           };
         }
-        return { content: `Lane atualizada para **${rawLane}**. O painel no canal foi atualizado.` };
+        return {
+          content:
+            `Lane atualizada para **${rawLane}**. O painel em ${`<#${queueChannel}>`} foi actualizado.`,
+        };
       }
       const { count } = await supabase
         .from("queue_entries")
@@ -206,23 +255,36 @@ export async function processApplicationCommand(
       }
       try {
         const { DISCORD_BOT_TOKEN } = getServerEnv();
-        await syncQueueBoardMessage(supabase, DISCORD_BOT_TOKEN, guildId, channelId);
+        await syncQueueBoardMessage(supabase, DISCORD_BOT_TOKEN, guildId, queueChannel);
       } catch (e) {
         console.error(e);
         return {
           content:
             "Entraste na fila (" +
             ((count ?? 0) + 1) +
-            "/10). Aviso: não consegui atualizar o painel — verifica se o bot pode **enviar/editar mensagens** neste canal.",
+            "/10). Aviso: não consegui actualizar o painel em " +
+            `<#${queueChannel}>` +
+            " — o bot precisa de **ver/enviar/gestão de mensagens** aí.",
         };
       }
-      return { content: "Entraste na fila como **" + rawLane + "** (" + ((count ?? 0) + 1) + "/10). Vê o painel fixo no canal." };
+      return {
+        content:
+          "Entraste na fila como **" +
+          rawLane +
+          "** (" +
+          ((count ?? 0) + 1) +
+          "/10). O painel fixo está em " +
+          `<#${queueChannel}>` +
+          " (ou define com `/canais fila`).",
+      };
     }
     case "sair": {
-      const channelId = it.channel_id;
-      if (!channelId) {
+      const eventChannel = it.channel_id;
+      if (!eventChannel) {
         return { content: "Canal inválido." };
       }
+      const queueChannel =
+        (await resolveQueueChannelId(supabase, guildId, eventChannel)) ?? eventChannel;
       const { data: p } = await supabase
         .from("profiles")
         .select("id")
@@ -238,11 +300,11 @@ export async function processApplicationCommand(
         .eq("user_id", p.id);
       try {
         const { DISCORD_BOT_TOKEN } = getServerEnv();
-        await syncQueueBoardMessage(supabase, DISCORD_BOT_TOKEN, guildId, channelId);
+        await syncQueueBoardMessage(supabase, DISCORD_BOT_TOKEN, guildId, queueChannel);
       } catch (e) {
         console.error(e);
       }
-      return { content: "Saíste da fila." };
+      return { content: "Saíste da fila. (Painel: " + `<#${queueChannel}>` + ")" };
     }
     case "fila": {
       const { data: rows, error } = await supabase
@@ -257,7 +319,7 @@ export async function processApplicationCommand(
       if (!rows?.length) {
         return {
           content:
-            "Fila vazia. Usa `/entrar` com a tua lane (TOP/JG/MID/ADC).\n" +
+            "Fila vazia. Usa `/entrar` com a tua lane (TOP/JG/MID/ADC/SUP).\n" +
             "Se o servidor **já devia** ter pessoas na fila, no Vercel a env `SUPABASE_SERVICE_ROLE_KEY` provavelmente **não** é a chave **service_role** (Supabase → API) — a chave `anon` faz a fila parecer vazia e bloqueia `/entrar`.",
         };
       }
@@ -345,10 +407,11 @@ export async function processApplicationCommand(
         return { content: "Erro ao gravar participantes. Tenta de novo." };
       }
       await supabase.from("queue_entries").delete().eq("guild_id", guildId);
-      if (it.channel_id) {
+      const queueChannelAfter = await resolveQueueChannelId(supabase, guildId, it.channel_id);
+      if (queueChannelAfter) {
         try {
           const { DISCORD_BOT_TOKEN } = getServerEnv();
-          await syncQueueBoardMessage(supabase, DISCORD_BOT_TOKEN, guildId, it.channel_id);
+          await syncQueueBoardMessage(supabase, DISCORD_BOT_TOKEN, guildId, queueChannelAfter);
         } catch (e) {
           console.error(e);
         }
@@ -457,11 +520,105 @@ export async function processApplicationCommand(
         const sign = r.delta >= 0 ? "+" : "";
         return `• ${who} ${sign}${r.delta} → **${(Math.round(r.mmrAfter * 10) / 10).toFixed(1)}**`;
       });
+      const rankCh = await resolveRankingChannelId(supabase, guildId);
+      if (rankCh) {
+        try {
+          const { DISCORD_BOT_TOKEN } = getServerEnv();
+          await syncRankingBoardMessage(supabase, DISCORD_BOT_TOKEN, guildId, rankCh);
+        } catch (e) {
+          console.error(e);
+        }
+      }
       return {
         content:
           `Partida \`${m.id}\` concluída. Vencedor: **Time ${winner}**.\n` +
-          outLines.join("\n"),
+          outLines.join("\n") +
+          (rankCh ? `\n\n(O painel de ranking em ${`<#${rankCh}>`} foi actualizado.)` : ""),
       };
+    }
+    case "canais": {
+      if (!isStaffGuildMember(it.member?.roles)) {
+        return { content: "Apenas staff pode definir canais. Configura `DISCORD_STAFF_ROLE_IDS`." };
+      }
+      const parsed = parseCanaisSub(it);
+      if (parsed.kind === "ver") {
+        const { data: row } = await supabase
+          .from("guild_text_channels")
+          .select("queue_channel_id, ranking_channel_id")
+          .eq("guild_id", guildId)
+          .maybeSingle();
+        const r = row as { queue_channel_id: string | null; ranking_channel_id: string | null } | null;
+        if (!r) {
+          return {
+            content:
+              "**Canais do servidor:** ainda nada fixo. Usa `/canais fila` (canal) e `/canais ranking` (canal). " +
+              "Enquanto isso, o painel da fila abre no canal de cada comando.",
+          };
+        }
+        const q = r.queue_channel_id ? `<#${r.queue_channel_id}>` : "— (painel = canal do `/entrar`)";
+        const rk = r.ranking_channel_id
+          ? `<#${r.ranking_channel_id}>`
+          : "— (só a resposta a `/ranking` no canal do comando; define `/canais ranking` para painel fixo)";
+        return { content: `**Fila (embed):** ${q}\n**Ranking (embed):** ${rk}` };
+      }
+      if (!parsed.channelId) {
+        return { content: "Indica a opção `canal` (menu do comando `/canais`)." };
+      }
+      if (parsed.kind === "fila") {
+        try {
+          await patchGuildTextChannels(supabase, guildId, { queue_channel_id: parsed.channelId });
+        } catch (e) {
+          console.error(e);
+          return { content: "Erro ao guardar. Tenta de novo." };
+        }
+        await supabase.from("queue_boards").delete().eq("guild_id", guildId);
+        try {
+          const { DISCORD_BOT_TOKEN } = getServerEnv();
+          await syncQueueBoardMessage(supabase, DISCORD_BOT_TOKEN, guildId, parsed.channelId);
+        } catch (e) {
+          console.error(e);
+          return {
+            content:
+              "Definição gravada, mas o bot **não publicou** o painel em " +
+              `<#${parsed.channelId}>` +
+              " — repara em permissões: ver canal, enviar, embeds, gestor de mensagens.",
+          };
+        }
+        return {
+          content:
+            "Canal de **fila** fixo: " +
+            `<#${parsed.channelId}>` +
+            ". O painel actualiza aí quando alguém usa `/entrar` ou `/sair` (em qualquer canal).",
+        };
+      }
+      if (parsed.kind === "ranking") {
+        try {
+          await patchGuildTextChannels(supabase, guildId, { ranking_channel_id: parsed.channelId });
+        } catch (e) {
+          console.error(e);
+          return { content: "Erro ao guardar. Tenta de novo." };
+        }
+        await supabase.from("ranking_boards").delete().eq("guild_id", guildId);
+        try {
+          const { DISCORD_BOT_TOKEN } = getServerEnv();
+          await syncRankingBoardMessage(supabase, DISCORD_BOT_TOKEN, guildId, parsed.channelId);
+        } catch (e) {
+          console.error(e);
+          return {
+            content:
+              "Definição gravada, mas o bot **não publicou** o painel de ranking em " +
+              `<#${parsed.channelId}>` +
+              ".",
+          };
+        }
+        return {
+          content:
+            "Canal de **ranking** fixo: " +
+            `<#${parsed.channelId}>` +
+            ". O top 20 actualiza com `/resultado` ou com `/ranking` (a partir de qualquer canal).",
+        };
+      }
+      return { content: "Subcomando inválido." };
     }
     case "ranking": {
       const { data: top, error } = await supabase
@@ -480,7 +637,21 @@ export async function processApplicationCommand(
         const l = p.losses ?? 0;
         return `${i + 1}. ${p.display_name ?? p.discord_user_id ?? "?"} — **${(Math.round((p as { mmr: number }).mmr * 10) / 10).toFixed(1)}** (${w}V/${l}D)`;
       });
-      return { content: "**Top 20 (MMR)**\n" + lines.join("\n") };
+      const rankCh = await resolveRankingChannelId(supabase, guildId);
+      if (rankCh) {
+        try {
+          const { DISCORD_BOT_TOKEN } = getServerEnv();
+          await syncRankingBoardMessage(supabase, DISCORD_BOT_TOKEN, guildId, rankCh);
+        } catch (e) {
+          console.error(e);
+        }
+      }
+      return {
+        content:
+          "**Top 20 (MMR)**\n" +
+          lines.join("\n") +
+          (rankCh ? "\n\n✓ Painel do ranking actualizado em " + `<#${rankCh}>` + "." : ""),
+      };
     }
     default:
       return { content: "Comando desconhecido." };
